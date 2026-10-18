@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import hashlib
@@ -21,36 +22,38 @@ OPTIONS = [
 
 
 def get_supabase_client():
-    """Read connection values from Streamlit Community Cloud Secrets."""
+    """Connect using Streamlit Community Cloud Secrets."""
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_ANON_KEY"]
     return create_client(url, key)
 
 
 def hash_code(code):
-    """Hash the one-time code before sending it to Supabase."""
-    return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+    """Hash the one-time voting code."""
+    return hashlib.sha256(
+        code.strip().upper().encode("utf-8")
+    ).hexdigest()
 
 
 st.title("🔬 " + TITLE)
+
 st.write(
-    "Please select ONE approach. The aim is to agree on a fair and manageable "
-    "arrangement while meeting the learning objectives."
+    "Please select ONE approach. The aim is to agree on a fair and "
+    "manageable arrangement while meeting the learning objectives."
 )
+
 st.info(
     "Do not enter your name or admission number. Enter only your assigned "
-    "one-time voting code. Your selected option is stored without your code "
-    "or identity."
+    "one-time voting code. Your selected option is stored without your "
+    "code or identity."
 )
 
 # 1. Connect to Supabase
 try:
     supabase = get_supabase_client()
-except Exception:
-    st.error(
-        "Cannot connect to the poll database. Check the Streamlit Secrets "
-        "settings: SUPABASE_URL and SUPABASE_ANON_KEY."
-    )
+except Exception as e:
+    st.error("Cannot connect to the poll database.")
+    st.code(repr(e))
     st.stop()
 
 # 2. Read poll status
@@ -62,17 +65,22 @@ try:
         .single()
         .execute()
     )
+
+    if not status_result.data:
+        st.error("No poll settings row was found.")
+        st.stop()
+
     poll_status = status_result.data["status"]
-except Exception:
-    st.error(
-        "Cannot read poll status. Check that the poll_settings table exists "
-        "and that anonymous users have SELECT permission for the status row."
-    )
+
+except Exception as e:
+    st.error("Cannot read poll status. Actual database error:")
+    st.code(repr(e))
     st.stop()
 
 # 3. Voting form
 if poll_status != "OPEN":
     st.warning("Voting is currently closed.")
+
 else:
     with st.form("vote_form"):
         code = st.text_input(
@@ -95,8 +103,10 @@ else:
     if submitted:
         if len(code) != 8 or not code.isalnum():
             st.error("Enter a valid 8-character voting code.")
+
         elif choice is None:
             st.error("Please select one option.")
+
         else:
             try:
                 result = supabase.rpc(
@@ -108,32 +118,45 @@ else:
                 ).execute()
 
                 response = result.data
+
                 if response == "OK":
-                    st.success("Your vote has been recorded. Thank you!")
+                    st.success(
+                        "Your vote has been recorded. Thank you!"
+                    )
                     st.rerun()
+
                 elif response == "USED":
-                    st.error("This voting code has already been used.")
+                    st.error(
+                        "This voting code has already been used."
+                    )
+
                 elif response == "INVALID":
                     st.error(
-                        "That voting code is not valid. Check it with the "
-                        "class representative."
+                        "That voting code is not valid. Check it "
+                        "with the class representative."
                     )
+
                 elif response == "CLOSED":
                     st.error("Voting has closed.")
+
                 else:
                     st.error(
-                        "The vote was not recorded. Please contact the lecturer."
+                        "The vote was not recorded. Unexpected "
+                        "database response:"
                     )
-            except Exception:
-                st.error(
-                    "The vote could not be submitted. The database function "
-                    "or its permissions may need checking."
-                )
+                    st.code(repr(response))
+
+            except Exception as e:
+                st.error("The vote could not be submitted.")
+                st.code(repr(e))
 
 # 4. Aggregate results only
 st.divider()
 st.subheader("Poll results")
-st.caption("Only aggregate totals are displayed; individual votes are not shown.")
+
+st.caption(
+    "Only aggregate totals are displayed; individual votes are not shown."
+)
 
 try:
     results = (
@@ -144,6 +167,7 @@ try:
     )
 
     counts = {option: 0 for option in OPTIONS}
+
     for row in results:
         if row["option_text"] in counts:
             counts[row["option_text"]] = int(row["vote_count"])
@@ -153,20 +177,28 @@ try:
 
     if total == 0:
         st.write("No votes have been recorded yet.")
+
     else:
         results_df = pd.DataFrame(
-            [{"Option": option, "Votes": count} for option, count in counts.items()]
+            [
+                {"Option": option, "Votes": count}
+                for option, count in counts.items()
+            ]
         )
+
         st.bar_chart(results_df.set_index("Option"))
 
         for option, count in sorted(
-            counts.items(), key=lambda item: item[1], reverse=True
+            counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
         ):
-            percentage = (count / total * 100) if total else 0
-            st.write(f"**{count} votes ({percentage:.1f}%)** — {option}")
+            percentage = count / total * 100
 
-except Exception:
-    st.warning(
-        "The voting page is available, but the results are not accessible yet. "
-        "Check the poll_results view permissions in Supabase before sharing the poll."
-    )
+            st.write(
+                f"**{count} votes ({percentage:.1f}%)** — {option}"
+            )
+
+except Exception as e:
+    st.warning("The results could not be loaded.")
+    st.code(repr(e))
