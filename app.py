@@ -1,10 +1,13 @@
 import streamlit as st
 import pandas as pd
-import json
 import hashlib
-from pathlib import Path
+import os
+import time
+from datetime import datetime, timezone
+from supabase import create_client, Client
 
 st.set_page_config(page_title="SPH 401 Project Poll", page_icon="🔬", layout="centered")
+
 TITLE = "SPH 401 Atomic Spectrometer Project Poll"
 OPTIONS = [
     "Option 1: Lecturer-guided design — lecturer guides design/construction; students handle data acquisition and analysis.",
@@ -13,69 +16,86 @@ OPTIONS = [
     "Option 4: Fully independent project — students handle all stages independently, asking for clarification when needed.",
     "Option 5: Simplified design and guided practical sessions — use a standard design and focus on spectra, calibration, analysis, and identifying elements."
 ]
-DATA_FILE = Path("poll_data.json")
 
-def load_data():
-    if DATA_FILE.exists():
-        try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"status": "OPEN", "votes": [], "used_code_hashes": []}
+def supabase_client() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_ANON_KEY"]
+    return create_client(url, key)
 
-def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def hash_code(code):
+def digest(code: str) -> str:
+    # Codes should be random, high-entropy strings; only the digest is stored.
     return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
 
 st.title("🔬 " + TITLE)
-st.write("Please select ONE approach for completing the project. The aim is to agree on a fair and manageable arrangement while meeting the learning objectives.")
-st.info("Do not enter your name or registration number. Use your assigned one-time voting code. Important: this starter version stores data in a local file, which is not reliable persistent storage on free cloud hosting.")
+st.write("Please select ONE approach. The aim is to agree on a fair and manageable arrangement while meeting the learning objectives.")
+st.info("Do not enter your name or admission number. Enter only your assigned one-time voting code. Your selected option is stored without your code or identity.")
 
-data = load_data()
-if data["status"] != "OPEN":
+try:
+    supabase = supabase_client()
+except Exception:
+    st.error("The poll database is not configured yet. The lecturer must finish the setup steps in the README before voting opens.")
+    st.stop()
+
+# Public poll status is read from a table with RLS/policies configured in the setup guide.
+try:
+    status_result = supabase.table("poll_settings").select("status").eq("id", 1).single().execute()
+    poll_status = status_result.data["status"]
+except Exception:
+    st.error("The poll database tables or permissions are not configured correctly yet.")
+    st.stop()
+
+if poll_status != "OPEN":
     st.warning("Voting is currently closed.")
 else:
     with st.form("vote_form"):
-        code = st.text_input("Your one-time voting code", max_chars=20).strip().upper()
+        code = st.text_input("Your one-time voting code", max_chars=8, help="Enter the 8-character code given to you.")
         choice = st.radio("Which approach do you prefer?", OPTIONS, index=None)
         submitted = st.form_submit_button("Submit my vote", use_container_width=True)
+
     if submitted:
-        if not code:
-            st.error("Enter your assigned voting code.")
+        code = code.strip().upper()
+        if len(code) != 8 or not code.isalnum():
+            st.error("Enter a valid 8-character voting code.")
         elif choice is None:
-            st.error("Select one option.")
+            st.error("Please select one option.")
         else:
-            code_hash = hash_code(code)
-            current = load_data()
-            if current["status"] != "OPEN":
-                st.error("Voting has closed.")
-            elif code_hash in current["used_code_hashes"]:
-                st.error("This voting code has already been used.")
-            else:
-                current["used_code_hashes"].append(code_hash)
-                current["votes"].append({"option": choice})
-                save_data(current)
-                st.success("Your vote has been recorded. Thank you!")
-                st.rerun()
+            try:
+                code_hash = digest(code)
+                # Atomic RPC function validates unused code, records anonymous vote,
+                # and marks the code used in a single database transaction.
+                result = supabase.rpc("cast_vote", {
+                    "p_code_hash": code_hash,
+                    "p_option": choice
+                }).execute()
+                if result.data == "OK":
+                    st.success("Your vote has been recorded. Thank you!")
+                    st.rerun()
+                elif result.data == "USED":
+                    st.error("This voting code has already been used.")
+                elif result.data == "INVALID":
+                    st.error("That voting code is not valid. Check it with the class representative.")
+                elif result.data == "CLOSED":
+                    st.error("Voting has closed.")
+                else:
+                    st.error("Your vote could not be recorded. Please contact the class representative.")
+            except Exception:
+                st.error("The vote could not be submitted. Please try again later or contact the lecturer.")
 
 st.divider()
 st.subheader("Poll results")
-st.caption("Refresh the page to see current results.")
-data = load_data()
-counts = {option: 0 for option in OPTIONS}
-for vote in data["votes"]:
-    if vote.get("option") in counts:
-        counts[vote["option"]] += 1
-total = sum(counts.values())
-st.metric("Total votes", total)
-if total:
-    results = pd.DataFrame([{"Option": option, "Votes": count} for option, count in counts.items()])
-    st.bar_chart(results.set_index("Option"))
-    for option, count in sorted(counts.items(), key=lambda item: item[1], reverse=True):
-        pct = count / total * 100 if total else 0
-        st.write(f"**{count} votes ({pct:.1f}%)** — {option}")
-else:
-    st.write("No votes have been recorded yet.")
-st.caption("Do not use this prototype for the live class poll until persistent storage is configured and tested.")
+st.caption("Results are aggregate totals only.")
+try:
+    rows = supabase.table("poll_results").select("option_text,vote_count").execute().data
+    total = sum(int(r["vote_count"]) for r in rows)
+    st.metric("Total votes", total)
+    if total:
+        df = pd.DataFrame([{"Option": r["option_text"], "Votes": int(r["vote_count"])} for r in rows])
+        st.bar_chart(df.set_index("Option"))
+        for r in sorted(rows, key=lambda x: int(x["vote_count"]), reverse=True):
+            count = int(r["vote_count"])
+            pct = count * 100 / total if total else 0
+            st.write(f"**{count} votes ({pct:.1f}%)** — {r['option_text']}")
+    else:
+        st.write("No votes have been recorded yet.")
+except Exception:
+    st.caption("Results will appear once the poll database setup is complete.")
