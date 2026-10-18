@@ -41,8 +41,9 @@ try:
     status_result = supabase.table("poll_settings").select("status").eq("id", 1).single().execute()
     poll_status = status_result.data["status"]
 except Exception:
-    st.error("The poll database tables or permissions are not configured correctly yet.")
-    st.stop()
+except Exception as e:
+    st.error(f"Database diagnostic: {e}")
+    st.stop()   
 
 if poll_status != "OPEN":
     st.warning("Voting is currently closed.")
