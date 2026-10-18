@@ -40,10 +40,13 @@ except Exception:
 try:
     status_result = supabase.table("poll_settings").select("status").eq("id", 1).single().execute()
     poll_status = status_result.data["status"]
-except Exception:
+
+try:
+    supabase = supabase_client()
 except Exception as e:
-    st.error(f"Database diagnostic: {e}")
-    st.stop()   
+    st.error(f"Database connection error: {e}")
+    st.stop()
+
 
 if poll_status != "OPEN":
     st.warning("Voting is currently closed.")
